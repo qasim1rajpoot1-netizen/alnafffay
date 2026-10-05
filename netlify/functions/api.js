@@ -45,22 +45,35 @@ const productValues = (d) => ({
   image: text(d.image), description: text(d.description), sale_on: !!d.sale_on, new_arrival: !!d.new_arrival,
   stock: d.stock === undefined ? true : !!d.stock
 });
-const secret = () => crypto.createHash('sha256').update(DEFAULT_PASSWORD).digest('hex');
-const sign = (payload) => crypto.createHmac('sha256', secret()).update(payload).digest('hex');
-const makeCookie = () => {
+const hashPassword = (pw, salt) => crypto.scryptSync(String(pw), salt, 64).toString('hex');
+const getStoredPassword = async () => store().get('admin/password', { type: 'json' });
+const checkPassword = async (pw) => {
+  const stored = await getStoredPassword();
+  if (!stored) return text(pw) === DEFAULT_PASSWORD;
+  const a = Buffer.from(hashPassword(pw, stored.salt), 'hex'), b = Buffer.from(stored.hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+// Session signing secret is derived from the current password, so changing it logs out old sessions.
+const secret = async () => {
+  const stored = await getStoredPassword();
+  return crypto.createHash('sha256').update(stored ? stored.hash : DEFAULT_PASSWORD).digest('hex');
+};
+const sign = async (payload) => crypto.createHmac('sha256', await secret()).update(payload).digest('hex');
+const makeCookie = async () => {
   const exp = Date.now() + 7*24*60*60*1000;
   const payload = String(exp);
-  const token = `${payload}.${sign(payload)}`;
+  const token = `${payload}.${await sign(payload)}`;
   return `an_admin=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${7*24*60*60}`;
 };
-const validCookie = (req) => {
+const validCookie = async (req) => {
   const raw = req.headers.get('cookie') || '';
   const match = raw.split(';').map(x=>x.trim()).find(x=>x.startsWith('an_admin='));
   if (!match) return false;
   const token = match.slice('an_admin='.length);
   const [exp,sig] = token.split('.');
   if (!exp || !sig || Number(exp) < Date.now()) return false;
-  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(sign(exp)));
+  const a = Buffer.from(sig), b = Buffer.from(await sign(exp));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 };
 const adminOnly = (req) => validCookie(req);
 const bad = (message,status=404) => json({error:message},status);
@@ -122,19 +135,29 @@ export default async (req) => {
 
   if (resource === 'admin' && idPart === 'login' && method === 'POST') {
     const d = await readJson(req);
-    if (text(d.password) !== DEFAULT_PASSWORD) return json({error:'Wrong password'},401);
-    return json({ok:true},200,{'Set-Cookie':makeCookie()});
+    if (!(await checkPassword(d.password))) return json({error:'Wrong password'},401);
+    return json({ok:true},200,{'Set-Cookie':await makeCookie()});
   }
   if (resource === 'admin' && idPart === 'logout' && method === 'POST') {
     return json({ok:true},200,{'Set-Cookie':'an_admin=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0'});
   }
-  if (resource === 'admin' && idPart === 'me' && method === 'GET') return json({admin:adminOnly(req)});
+  if (resource === 'admin' && idPart === 'password' && method === 'POST') {
+    if (!(await adminOnly(req))) return json({error:'Login required'},401);
+    const d = await readJson(req);
+    const next = text(d.new_password);
+    if (!(await checkPassword(d.current_password))) return bad('Current password is incorrect',400);
+    if (next.length < 8) return bad('New password must be at least 8 characters',400);
+    const salt = crypto.randomBytes(16).toString('hex');
+    await s.setJSON('admin/password', { salt, hash: hashPassword(next, salt), updated_at: now() });
+    return json({ok:true},200,{'Set-Cookie':'an_admin=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0'});
+  }
+  if (resource === 'admin' && idPart === 'me' && method === 'GET') return json({admin:await adminOnly(req)});
 
   await ensureSeeded();
 
   if (resource === 'products') {
     if (method === 'GET' && !idPart) return json(await listAll('products'));
-    if (!adminOnly(req)) return json({error:'Login required'},401);
+    if (!(await adminOnly(req))) return json({error:'Login required'},401);
     if (method === 'POST' && !idPart) {
       const id = await nextId('products');
       const row = {id, ...productValues(await readJson(req))};
@@ -174,7 +197,7 @@ export default async (req) => {
       try { email = await sendOrderEmail(row, 'placed'); } catch (e) { email = {sent:false, skipped:false, error:text(e.message)}; }
       return json({...row, email},201);
     }
-    if (!adminOnly(req)) return json({error:'Login required'},401);
+    if (!(await adminOnly(req))) return json({error:'Login required'},401);
     if (method === 'GET' && !idPart) return json((await listAll('orders')).reverse());
     if (id && method === 'PUT') {
       const d = await readJson(req), status = text(d.status) || 'Pending';
@@ -192,10 +215,14 @@ export default async (req) => {
       }
       return json({...row, email});
     }
+    if (id && method === 'DELETE') {
+      if (!(await s.get(key('orders',id)))) return bad('Order not found',404);
+      await s.delete(key('orders',id)); return json({ok:true});
+    }
   }
 
   if (resource === 'customers' && method === 'GET' && !idPart) {
-    if (!adminOnly(req)) return json({error:'Login required'},401);
+    if (!(await adminOnly(req))) return json({error:'Login required'},401);
     const groups = new Map();
     for (const o of await listAll('orders')) {
       if (!o.name) continue;
@@ -209,7 +236,7 @@ export default async (req) => {
 
   if (resource === 'settings' && !idPart) {
     if (method === 'GET') return json((await s.get('settings',{type:'json'})) || DEFAULT_SETTINGS);
-    if (!adminOnly(req)) return json({error:'Login required'},401);
+    if (!(await adminOnly(req))) return json({error:'Login required'},401);
     if (method === 'POST') {
       const d = await readJson(req);
       const row = {id:1,name:text(d.name)||DEFAULT_SETTINGS.name,tagline:text(d.tagline)||DEFAULT_SETTINGS.tagline,wa:text(d.wa),phone:text(d.phone),ig:text(d.ig),email:text(d.email),owner:text(d.owner),about_title:text(d.about_title)||DEFAULT_SETTINGS.about_title,about_text:text(d.about_text)||DEFAULT_SETTINGS.about_text,location:text(d.location),address:text(d.address),hours:text(d.hours)};
