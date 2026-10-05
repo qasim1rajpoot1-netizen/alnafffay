@@ -1,0 +1,23 @@
+AL NAFAY - AUTOMATIC ORDER EMAILS
+
+This version sends customer emails for the full order lifecycle:
+- Order Placed: sent automatically when the customer places an order.
+- Order Confirmed: sent when Admin changes Pending -> Confirmed.
+- Order Completed: sent when Admin changes the order to Completed.
+- Order Cancelled: sent when Admin changes the order to Cancelled.
+
+It also adds an Admin notification for NEW/UNSEEN orders. The Admin panel checks for new orders in the background and shows a notification/badge until the Orders section is opened.
+
+One-time Netlify setup:
+1. In Resend, verify your sending domain.
+2. In Netlify: Project configuration -> Environment variables.
+3. Add:
+   RESEND_API_KEY = your Resend API key
+   RESEND_FROM_EMAIL = AL NAFAY <orders@al-nafay.space>
+4. Deploy the updated site.
+
+Important:
+- Customer must enter a valid email address at checkout for customer emails.
+- If email service is not configured or customer email is missing, the order still saves/changes status; the email is skipped.
+- If Resend rejects an email, the order status still changes and the Admin panel reports the email error.
+- Emails are sent once when an order enters each lifecycle status; changing the same status again does not resend it.
