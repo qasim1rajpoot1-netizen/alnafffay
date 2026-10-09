@@ -135,6 +135,17 @@ export default async (req) => {
 
   if (resource === 'admin' && idPart === 'login' && method === 'POST') {
     const d = await readJson(req);
+    // EMERGENCY RESET: works only while ALNAFAY_RESET_PASSWORD is set in Netlify. Remove that variable after use.
+    const resetPw = process.env.ALNAFAY_RESET_PASSWORD || '';
+    if (resetPw.length >= 8) {
+      const given = crypto.createHash('sha256').update(text(d.password)).digest();
+      const want = crypto.createHash('sha256').update(resetPw).digest();
+      if (crypto.timingSafeEqual(given, want)) {
+        const salt = crypto.randomBytes(16).toString('hex');
+        await s.setJSON('admin/password', { salt, hash: hashPassword(resetPw, salt), updated_at: now() });
+        return json({ok:true},200,{'Set-Cookie':await makeCookie()});
+      }
+    }
     if (!(await checkPassword(d.password))) return json({error:'Wrong password'},401);
     return json({ok:true},200,{'Set-Cookie':await makeCookie()});
   }
